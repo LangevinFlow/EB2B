@@ -1,0 +1,2 @@
+image_num:{butterfly.png}	PSNR:{20.89}	SSIM:{0.7406}	PSNR_KERNEL:{54.99}
+*****Average Result: image_num:{1}	PSNR:{20.89}	SSIM:{0.7406}	kernelPSNR:{54.9946}*****
