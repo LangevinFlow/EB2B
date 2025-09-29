@@ -67,7 +67,7 @@ class EBTrainingConfig:
     @property
     def actual_max_iters(self) -> int:
         """Compute actual outer loop iterations (divided by I_loop_x like DKP)"""
-        return self.max_iters // self.I_loop_x
+        return max(1, self.max_iters // max(1, self.I_loop_x))
 
     @property
     def print_iteration(self) -> int:
@@ -162,6 +162,7 @@ class EBTrainer:
         self.ssim_iterations = self.config.ssim_threshold
         self.print_iteration = self.config.print_iteration
         self.output_dir: Optional[Path] = None
+        self.save_output = self.config.save_output
         self.save_output = self.config.save_output
 
     def train(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -302,3 +303,4 @@ class EBTrainer:
         stem = self.lr_path.stem
         if self.save_output:
             save_sr_kernel_figure(sr_img, kernel, output_dir / f"{stem}.png")
+        return sr_img, kernel

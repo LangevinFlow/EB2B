@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import json
+import shutil
+import dataclasses
 from pathlib import Path
 
 import torch
+from PIL import Image
 
 if __package__ is None or __package__ == "":
     import sys
@@ -14,15 +19,15 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(package_root))
 
     from trainer import EBTrainer, EBTrainingConfig  # type: ignore
-    from utils import ensure_dir  # type: ignore
+    from utils import ensure_dir, save_sr_kernel_figure  # type: ignore
 else:
     from .trainer import EBTrainer, EBTrainingConfig
-    from .utils import ensure_dir
+    from .utils import ensure_dir, save_sr_kernel_figure
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Empirical Bayes super-resolution (EB2B)")
-    parser.add_argument("--dataset", type=str, default="butterfly", help="Dataset name (for default directory layout)")
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name (for direct single-image run or to filter config entries)")
     parser.add_argument("--sf", type=int, default=4, help="Scale factor")
     parser.add_argument("--input-dir", type=Path, default=None, help="Directory containing low-resolution inputs")
     parser.add_argument("--hr-dir", type=Path, default=None, help="Directory containing high-resolution references")
@@ -39,6 +44,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--I-loop-x", type=int, default=5, help="Number of inner DIP iterations per outer iteration")
     parser.add_argument("--I-loop-k", type=int, default=3, help="Frequency of kernel gradient accumulation")
     parser.add_argument("--grad-loss-lr", type=float, default=1e-3, help="Gradient loss weight")
+    parser.add_argument("--config", type=Path, default=None, help="Path to JSON configuration for batch processing")
     parser.add_argument("--device", type=str, default="auto", help="Computation device: auto|cpu|cuda")
     parser.add_argument("--real", action="store_true", help="Treat input as real data without ground truth")
     parser.add_argument("--no-save-output", action="store_true", help="Disable saving intermediate/final figures")
@@ -69,6 +75,13 @@ def select_device(device_arg: str) -> torch.device:
 def main(argv: list[str] | None = None) -> None:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    if args.config is not None:
+        run_from_config(args)
+        return
+
+    if args.dataset is None:
+        parser.error("--dataset is required when --config is not provided")
 
     default_input, default_hr, default_output = infer_default_paths(args.dataset, args.sf)
 
@@ -123,6 +136,155 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Processing {lr_path.name} (device={device})")
         trainer = EBTrainer(lr_path, hr_path=hr_path, device=device, config=config)
         trainer.run_and_save(output_dir)
+
+
+def run_from_config(args) -> None:
+    config_path = Path(args.config).expanduser()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    save_results = not args.no_save_output
+    device = select_device(args.device)
+
+    data_root = Path(cfg["data_root"]).expanduser()
+    output_root = Path(cfg.get("output_root", "outputs")).expanduser()
+    if not data_root.exists():
+        raise FileNotFoundError(f"Data root not found: {data_root}")
+    if save_results:
+        ensure_dir(output_root)
+    default_params = cfg.get("default_params", {})
+    artifact_cfg = cfg.get("artifact_layout", {})
+
+    lr_dir_name = artifact_cfg.get("lr_dir", "LR")
+    hr_dir_name = artifact_cfg.get("hr_dir", "HR")
+    recon_dir_name = artifact_cfg.get("recon_dir", "Recon")
+
+    dataset_entries = cfg.get("datasets", [])
+    if not dataset_entries:
+        print("No dataset entries found in configuration; nothing to run.")
+        return
+
+    config_fields = {field.name for field in dataclasses.fields(EBTrainingConfig)}
+
+    selected_name = args.dataset
+
+    for entry in dataset_entries:
+        name = entry.get("name")
+        if selected_name and name != selected_name:
+            continue
+
+        manifest_value = entry.get("manifest")
+        if manifest_value is None:
+            print(f"[WARN] Dataset entry '{name}' missing 'manifest'; skipping")
+            continue
+
+        manifest_path = Path(manifest_value)
+        if not manifest_path.is_absolute():
+            manifest_path = data_root / manifest_path
+        if not manifest_path.exists():
+            print(f"[WARN] Manifest not found for dataset '{name}': {manifest_path}")
+            continue
+
+        dataset_output_dir = output_root / (entry.get("output_subdir") or name or manifest_path.stem)
+        lr_output_dir = dataset_output_dir / lr_dir_name
+        recon_output_dir = dataset_output_dir / recon_dir_name
+        hr_output_dir = dataset_output_dir / hr_dir_name if entry.get("use_hr", True) else None
+
+        if save_results:
+            ensure_dir(dataset_output_dir)
+            ensure_dir(lr_output_dir)
+            ensure_dir(recon_output_dir)
+            if hr_output_dir is not None:
+                ensure_dir(hr_output_dir)
+
+        entry_params = dict(default_params)
+        entry_params.update(entry.get("params", {}))
+        entry_params["save_output"] = False  # disable intermediate saving during batch runs
+
+        scales_filter = entry.get("scales")
+        if scales_filter:
+            scales_filter = {int(s) for s in scales_filter}
+        splits_filter = entry.get("splits")
+        if splits_filter:
+            splits_filter = {str(s).lower() for s in splits_filter}
+
+        processed = 0
+
+        with manifest_path.open("r", newline="") as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                split_value = row.get("split", "").lower()
+                if splits_filter and split_value not in splits_filter:
+                    continue
+
+                try:
+                    scale = int(row.get("scale", entry_params.get("scale_factor", 1)))
+                except (TypeError, ValueError):
+                    print(f"[WARN] Invalid scale in row: {row}")
+                    continue
+
+                if scales_filter and scale not in scales_filter:
+                    continue
+
+                lr_rel = row.get("lr_path")
+                if not lr_rel:
+                    continue
+                lr_path = (data_root / lr_rel).expanduser()
+                if not lr_path.exists():
+                    print(f"[WARN] LR image missing: {lr_path}")
+                    continue
+
+                hr_path = None
+                if entry.get("use_hr", True):
+                    hr_rel = row.get("hr_path")
+                    if not hr_rel:
+                        print(f"[WARN] HR path missing for entry: {row}")
+                        continue
+                    hr_path_candidate = (data_root / hr_rel).expanduser()
+                    if not hr_path_candidate.exists():
+                        print(f"[WARN] HR image missing: {hr_path_candidate}")
+                        continue
+                    hr_path = hr_path_candidate
+
+                pair_id = row.get("pair_id") or Path(lr_rel).stem
+                output_basename = f"{pair_id}_x{scale}"
+
+                if save_results:
+                    lr_dest = lr_output_dir / f"{output_basename}_LR{lr_path.suffix}"
+                    if not lr_dest.exists():
+                        ensure_dir(lr_dest.parent)
+                        shutil.copy2(lr_path, lr_dest)
+
+                    if hr_output_dir is not None and hr_path is not None:
+                        hr_dest = hr_output_dir / f"{output_basename}_HR{hr_path.suffix}"
+                        if not hr_dest.exists():
+                            ensure_dir(hr_dest.parent)
+                            shutil.copy2(hr_path, hr_dest)
+
+                params = dict(entry_params)
+                params["scale_factor"] = scale
+                filtered_params = {k: params[k] for k in params if k in config_fields}
+                trainer_config = EBTrainingConfig(**filtered_params)
+
+                trainer = EBTrainer(lr_path, hr_path=hr_path, device=device, config=trainer_config)
+                trainer.save_output = False
+                print(f"Processing {name or manifest_path.stem}: {output_basename} (scale x{scale})")
+                sr_img, kernel = trainer.train()
+
+                if save_results:
+                    recon_output_dir.mkdir(parents=True, exist_ok=True)
+                    sr_path = recon_output_dir / f"{output_basename}_SR.png"
+                    Image.fromarray(sr_img).save(sr_path)
+
+                processed += 1
+
+        if processed == 0:
+            print(f"[WARN] No samples processed for dataset '{name}'")
+        else:
+            print(f"Completed dataset '{name}' ({processed} samples)")
 
 
 if __name__ == "__main__":  # pragma: no cover

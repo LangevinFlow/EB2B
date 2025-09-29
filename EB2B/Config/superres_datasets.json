@@ -1,0 +1,62 @@
+{
+  "data_root": "/mnt/DATA/SuperResolution",
+  "output_root": "~/ResearchProjects/ImageSuperRes/Results/",
+  "default_params": {
+    "scale_factor": 4,
+    "max_iters": 1000,
+    "eb_steps": 25,
+    "eb_lr": 0.0005,
+    "eb_prior_weight": 0.0001,
+    "dip_lr": 0.005,
+    "I_loop_x": 5,
+    "I_loop_k": 3,
+    "grad_loss_lr": 0.001,
+    "noise_sigma": 1.0,
+    "kernel_size": null,
+    "image_disturbance": 0.0,
+    "save_output": true
+  },
+  "artifact_layout": {
+    "lr_dir": "LR",
+    "hr_dir": "HR",
+    "recon_dir": "Recon",
+    "save_combined_figure": false
+  },
+  "datasets": [
+    {
+      "name": "Set5",
+      "manifest": "Set5.csv",
+      "use_hr": true,
+      "scales": [2, 3, 4],
+      "output_subdir": "Set5",
+      "params": {
+        "max_iters": 600,
+        "eb_steps": 20
+      }
+    },
+    {
+      "name": "Set14",
+      "manifest": "Set14.csv",
+      "use_hr": true,
+      "scales": [2, 3, 4],
+      "output_subdir": "Set14"
+    },
+    {
+      "name": "BSD100",
+      "manifest": "BSD100.csv",
+      "use_hr": true,
+      "scales": [2, 3, 4],
+      "output_subdir": "BSD100",
+      "params": {
+        "max_iters": 800
+      }
+    },
+    {
+      "name": "Urban100",
+      "manifest": "Urban100.csv",
+      "use_hr": true,
+      "scales": [2, 3, 4],
+      "output_subdir": "Urban100"
+    }
+  ]
+}
