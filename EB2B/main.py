@@ -41,6 +41,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-loss-lr", type=float, default=1e-3, help="Gradient loss weight")
     parser.add_argument("--device", type=str, default="auto", help="Computation device: auto|cpu|cuda")
     parser.add_argument("--real", action="store_true", help="Treat input as real data without ground truth")
+    parser.add_argument("--no-save-output", action="store_true", help="Disable saving intermediate/final figures")
     return parser
 
 
@@ -100,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
         I_loop_x=args.I_loop_x,
         I_loop_k=args.I_loop_k,
         grad_loss_lr=args.grad_loss_lr,
+        save_output=not args.no_save_output,
     )
 
     lr_images = sorted(input_dir.glob("*.png"))

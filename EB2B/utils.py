@@ -136,3 +136,20 @@ def gradient_magnitude(image: torch.Tensor, grad_filters: torch.Tensor) -> torch
     filters = grad_filters.to(image.device).unsqueeze(1)
     grads = F.conv2d(padded, filters)
     return grads.abs()
+
+def save_sr_kernel_figure(sr_image: np.ndarray, kernel: np.ndarray, path: Path) -> None:
+    ensure_dir(path.parent)
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+
+    axes[0].imshow(sr_image)
+    axes[0].axis("off")
+    axes[0].set_title("Deblurred SR")
+
+    im = axes[1].imshow(kernel, cmap="viridis")
+    axes[1].axis("off")
+    axes[1].set_title("Estimated Kernel")
+    fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
+
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)

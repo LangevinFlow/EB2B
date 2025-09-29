@@ -27,8 +27,7 @@ if __package__ is None or __package__ == "":
         image_to_tensor,
         load_image,
         make_gradient_filter,
-        save_image,
-        save_kernel,
+        save_sr_kernel_figure,
         tensor_to_image,
     )
 else:
@@ -43,8 +42,7 @@ else:
         image_to_tensor,
         load_image,
         make_gradient_filter,
-        save_image,
-        save_kernel,
+        save_sr_kernel_figure,
         tensor_to_image,
     )
 
@@ -64,6 +62,7 @@ class EBTrainingConfig:
     I_loop_k: int = 3
     grad_loss_lr: float = 1e-3
     image_disturbance: float = 0.0
+    save_output: bool = True
 
     @property
     def actual_max_iters(self) -> int:
@@ -77,7 +76,7 @@ class EBTrainingConfig:
     @property
     def ssim_threshold(self) -> int:
         """Compute SSIM iterations threshold (divided by I_loop_x like DKP)"""
-        return 80 // self.I_loop_x
+        return max(0, 80 // self.I_loop_x)
 
     def resolved_kernel_size(self) -> int:
         if self.kernel_size is not None:
@@ -163,6 +162,7 @@ class EBTrainer:
         self.ssim_iterations = self.config.ssim_threshold
         self.print_iteration = self.config.print_iteration
         self.output_dir: Optional[Path] = None
+        self.save_output = self.config.save_output
 
     def train(self) -> Tuple[np.ndarray, np.ndarray]:
         best_psnr = -float("inf")
@@ -276,11 +276,14 @@ class EBTrainer:
             f" Iter {iteration:03d}, loss: {loss_x.item():.6f}, PSNR: {psnr_val:.2f}, SSIM: {ssim_val:.4f}"
         )
 
-        if self.output_dir is not None:
+        if self.save_output and self.output_dir is not None:
             ensure_dir(self.output_dir)
             step_str = f"{global_step:05d}"
-            save_image(sr_img, self.output_dir / f"{self.lr_path.stem}_{step_str}.png")
-            save_kernel(kernel_np, self.output_dir, f"{self.lr_path.stem}_{step_str}")
+            save_sr_kernel_figure(
+                sr_img,
+                kernel_np,
+                self.output_dir / f"{self.lr_path.stem}_{step_str}.png",
+            )
 
     def calculate_grad_abs(self, padding_mode: str = "reflect") -> torch.Tensor:
         hr_pad = F.pad(self.im_HR_est, mode=padding_mode, pad=(1,) * 4)
@@ -294,8 +297,8 @@ class EBTrainer:
         return torch.abs(out.squeeze(0))
 
     def run_and_save(self, output_dir: Path) -> None:
-        self.output_dir = output_dir
+        self.output_dir = output_dir if self.save_output else None
         sr_img, kernel = self.train()
         stem = self.lr_path.stem
-        save_image(sr_img, output_dir / f"{stem}.png")
-        save_kernel(kernel, output_dir, stem)
+        if self.save_output:
+            save_sr_kernel_figure(sr_img, kernel, output_dir / f"{stem}.png")
