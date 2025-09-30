@@ -8,7 +8,9 @@ import json
 import shutil
 import dataclasses
 from pathlib import Path
+from typing import Dict, List
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -19,10 +21,12 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(package_root))
 
     from trainer import EBTrainer, EBTrainingConfig  # type: ignore
-    from utils import ensure_dir, save_sr_kernel_figure  # type: ignore
+    from utils import ensure_dir, save_sr_kernel_figure, calculate_psnr  # type: ignore
+    from losses import SSIMLoss  # type: ignore
 else:
     from .trainer import EBTrainer, EBTrainingConfig
-    from .utils import ensure_dir, save_sr_kernel_figure
+    from .utils import ensure_dir, save_sr_kernel_figure, calculate_psnr
+    from .losses import SSIMLoss
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -148,6 +152,8 @@ def run_from_config(args) -> None:
 
     save_results = not args.no_save_output
     device = select_device(args.device)
+    ssim_metric = SSIMLoss().to(device)
+    ssim_metric.eval()
 
     data_root = Path(cfg["data_root"]).expanduser()
     output_root = Path(cfg.get("output_root", "outputs")).expanduser()
@@ -192,6 +198,7 @@ def run_from_config(args) -> None:
         lr_output_dir = dataset_output_dir / lr_dir_name
         recon_output_dir = dataset_output_dir / recon_dir_name
         hr_output_dir = dataset_output_dir / hr_dir_name if entry.get("use_hr", True) else None
+        dataset_stats: List[Dict[str, str]] = []
 
         if save_results:
             ensure_dir(dataset_output_dir)
@@ -252,17 +259,21 @@ def run_from_config(args) -> None:
                 pair_id = row.get("pair_id") or Path(lr_rel).stem
                 output_basename = f"{pair_id}_x{scale}"
 
+                lr_saved_rel = ""
+                hr_saved_rel = ""
                 if save_results:
                     lr_dest = lr_output_dir / f"{output_basename}_LR{lr_path.suffix}"
                     if not lr_dest.exists():
                         ensure_dir(lr_dest.parent)
                         shutil.copy2(lr_path, lr_dest)
+                    lr_saved_rel = str(lr_dest.relative_to(dataset_output_dir))
 
                     if hr_output_dir is not None and hr_path is not None:
                         hr_dest = hr_output_dir / f"{output_basename}_HR{hr_path.suffix}"
                         if not hr_dest.exists():
                             ensure_dir(hr_dest.parent)
                             shutil.copy2(hr_path, hr_dest)
+                        hr_saved_rel = str(hr_dest.relative_to(dataset_output_dir))
 
                 params = dict(entry_params)
                 params["scale_factor"] = scale
@@ -274,17 +285,48 @@ def run_from_config(args) -> None:
                 print(f"Processing {name or manifest_path.stem}: {output_basename} (scale x{scale})")
                 sr_img, kernel = trainer.train()
 
+                psnr_val = ""
+                ssim_val = ""
+                if hr_path is not None:
+                    hr_uint8 = np.array(Image.open(hr_path).convert("RGB"), dtype=np.uint8)
+                    hr_tensor = torch.from_numpy(hr_uint8.transpose(2, 0, 1)).unsqueeze(0).float().to(device) / 255.0
+                    sr_tensor = torch.from_numpy(sr_img.transpose(2, 0, 1)).unsqueeze(0).float().to(device) / 255.0
+                    psnr_val = f"{calculate_psnr(hr_uint8, sr_img):.4f}"
+                    with torch.no_grad():
+                        ssim_val = f"{float(ssim_metric(sr_tensor, hr_tensor).item()):.4f}"
+
+                sr_saved_rel = ""
                 if save_results:
                     recon_output_dir.mkdir(parents=True, exist_ok=True)
                     sr_path = recon_output_dir / f"{output_basename}_SR.png"
                     Image.fromarray(sr_img).save(sr_path)
+                    sr_saved_rel = str(sr_path.relative_to(dataset_output_dir))
 
                 processed += 1
+                dataset_stats.append(
+                    {
+                        "dataset": name or manifest_path.stem,
+                        "pair_id": pair_id,
+                        "scale": str(scale),
+                        "psnr": psnr_val,
+                        "ssim": ssim_val,
+                        "sr_path": sr_saved_rel,
+                        "lr_path": lr_saved_rel or row.get("lr_path", ""),
+                        "hr_path": hr_saved_rel or row.get("hr_path", ""),
+                    }
+                )
 
         if processed == 0:
             print(f"[WARN] No samples processed for dataset '{name}'")
         else:
             print(f"Completed dataset '{name}' ({processed} samples)")
+            summary_path = dataset_output_dir / "results_summary.csv"
+            ensure_dir(dataset_output_dir)
+            with summary_path.open("w", newline="", encoding="utf-8") as csvfile:
+                fieldnames = ["dataset", "pair_id", "scale", "psnr", "ssim", "sr_path", "lr_path", "hr_path"]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(dataset_stats)
 
 
 if __name__ == "__main__":  # pragma: no cover
