@@ -1,6 +1,7 @@
 {
   "data_root": "/mnt/DATA/SuperResolution",
   "output_root": "~/ResearchProjects/ImageSuperRes/Results/",
+  "simdata_root": "/mnt/DATA/DegradedResolution/",
   "default_params": {
     "scale_factor": 4,
     "max_iters": 1000,

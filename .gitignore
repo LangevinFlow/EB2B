@@ -1,0 +1,12 @@
+# Results and simulated data
+Results/
+SimData/
+/mnt/DATA/DegradedResolution/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment/VSCode bits
+.env
+*.swp
