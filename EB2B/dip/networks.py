@@ -4,6 +4,43 @@ from .common import Concat, act, bn, conv
 from .non_local_dot_product import NONLocalBlock2D
 
 
+class ChannelAttention(nn.Module):
+    def __init__(self, channels: int, reduction: int = 16) -> None:
+        super().__init__()
+        reduction = max(1, channels // reduction)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, reduction, kernel_size=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(reduction, channels, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):  # type: ignore[override]
+        weight = self.fc(self.pool(x))
+        return x * weight
+
+
+class ResidualCAB(nn.Module):
+    def __init__(self, channels: int, act_fun: str = 'LeakyReLU', pad: str = 'zero', reduction: int = 16) -> None:
+        super().__init__()
+        self.body = nn.Sequential(
+            conv(channels, channels, 3, bias=True, pad=pad),
+            bn(channels),
+            act(act_fun),
+            conv(channels, channels, 3, bias=True, pad=pad),
+            bn(channels),
+        )
+        self.ca = ChannelAttention(channels, reduction=reduction)
+        self.activation = act(act_fun)
+
+    def forward(self, x):  # type: ignore[override]
+        res = self.body(x)
+        res = self.ca(res)
+        res = res + x
+        return self.activation(res)
+
+
 def skip(num_input_channels=2, num_output_channels=3,
          num_channels_down=[16, 32, 64, 128, 128], num_channels_up=[16, 32, 64, 128, 128],
          num_channels_skip=[4, 4, 4, 4, 4],
@@ -54,9 +91,7 @@ def skip(num_input_channels=2, num_output_channels=3,
         if i > 1:
             deeper.add(NONLocalBlock2D(in_channels=num_channels_down[i]))
 
-        deeper.add(conv(num_channels_down[i], num_channels_down[i], filter_size_down[i], bias=need_bias, pad=pad))
-        deeper.add(bn(num_channels_down[i]))
-        deeper.add(act(act_fun))
+        deeper.add(ResidualCAB(num_channels_down[i], act_fun=act_fun, pad=pad))
 
         deeper_main = nn.Sequential()
 
@@ -72,6 +107,7 @@ def skip(num_input_channels=2, num_output_channels=3,
                            pad=pad))
         model_tmp.add(bn(num_channels_up[i]))
         model_tmp.add(act(act_fun))
+        model_tmp.add(ResidualCAB(num_channels_up[i], act_fun=act_fun, pad=pad))
 
         if need1x1_up:
             model_tmp.add(conv(num_channels_up[i], num_channels_up[i], 1, bias=need_bias, pad=pad))

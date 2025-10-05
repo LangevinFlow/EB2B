@@ -82,9 +82,10 @@ python -m EB2B.main \
 ```
 
 By default the command expects LR/HR pairs under
-`DKP/data/datasets/<dataset>/DIPDKP_lr_x<sf>` and `.../HR`. Outputs are written
-to `EB2B/outputs/<dataset>_x<sf>`. Override the directories with
-`--input-dir`, `--hr-dir`, or `--output-dir` if your data lives elsewhere. The
+`DKP/data/datasets/<dataset>/DIPDKP_lr_x<sf>` and `.../HR`. Final reconstructions
+are written to `EB2B/outputs/<dataset>_x<sf>`, while intermediate logs land in a
+`logs/` subdirectory. Override the directories with `--input-dir`, `--hr-dir`,
+`--output-dir`, or `--output-log-dir` if your data lives elsewhere. The
 `--real` flag skips HR evaluation when no reference is available.
 
 ## Important Notes

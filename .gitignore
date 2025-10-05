@@ -1,7 +1,11 @@
 # Results and simulated data
-Results/
-SimData/
+
 /mnt/DATA/DegradedResolution/
+/Results/
+/SimData/
+
+# External models / checkpoints
+/DoSSR/
 
 # Python cache
 __pycache__/

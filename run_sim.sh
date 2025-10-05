@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Generate simulated LR datasets for Set5, Set14, BSD100, and Urban100.
+# Generate simulated LR datasets for Set5, Set14, BSD100, and Urban100. Set14 BSD100 Urban100 
 
 set -euo pipefail
 
+conda activate basedl >/dev/null 2>&1 || source activate basedl
+
 python SimData/generate_sim_data.py \
   --config EB2B/Config/superres_datasets.json \
-  --datasets Set5 \
-  --num-kernels 3 \
+  --data-root /mnt/DATA/BlindSuperRes \
+  --simdata-root /mnt/DATA/DegradedResolution \
+  --datasets  IXIT1 \
+  --num-kernels 5 \
   --kernel-type gaussian \
   --seed 0 \
-  --overwrite \
-  --simdata-root /mnt/DATA/DegradedResolution
+  --overwrite
 
-
-#Set14 BSD100 Urban100 

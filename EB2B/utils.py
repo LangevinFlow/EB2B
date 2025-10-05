@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -45,13 +45,81 @@ def get_noise(channels: int, height: int, width: int, device: torch.device, *, s
     return noise * sigma
 
 
-def calculate_psnr(reference: np.ndarray, target: np.ndarray) -> float:
-    reference = reference.astype(np.float64)
-    target = target.astype(np.float64)
-    mse = np.mean((reference - target) ** 2)
-    if mse == 0:
-        return float("inf")
-    return 20.0 * math.log10(255.0 / math.sqrt(mse))
+def _to_float(image: np.ndarray) -> np.ndarray:
+    return image.astype(np.float64)
+
+
+def _align_to_min(reference: np.ndarray, target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    min_h = min(reference.shape[0], target.shape[0])
+    min_w = min(reference.shape[1], target.shape[1])
+    if reference.ndim == 3:
+        reference = reference[:min_h, :min_w, :]
+    else:
+        reference = reference[:min_h, :min_w]
+    if target.ndim == 3:
+        target = target[:min_h, :min_w, :]
+    else:
+        target = target[:min_h, :min_w]
+    return reference, target
+
+
+def _crop_border(image: np.ndarray, border: int) -> np.ndarray:
+    if border <= 0:
+        return image
+    h, w = image.shape[:2]
+    border = min(border, h // 2, w // 2)
+    if image.ndim == 3:
+        return image[border:h - border, border:w - border, :]
+    return image[border:h - border, border:w - border]
+
+
+def _to_y_channel(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 2:
+        return image
+    r, g, b = image[..., 0], image[..., 1], image[..., 2]
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def calculate_metrics(reference: np.ndarray, target: np.ndarray, border: int = 0) -> dict:
+    ref = _to_float(reference)
+    tgt = _to_float(target)
+
+    ref, tgt = _align_to_min(ref, tgt)
+
+    ref = _crop_border(ref, border)
+    tgt = _crop_border(tgt, border)
+
+    ref_y = _crop_border(_to_y_channel(ref), 0)
+    tgt_y = _crop_border(_to_y_channel(tgt), 0)
+
+    mse_rgb = np.mean((ref - tgt) ** 2)
+    mse_y = np.mean((ref_y - tgt_y) ** 2)
+
+    psnr_rgb = float("inf") if mse_rgb == 0 else 20.0 * math.log10(255.0 / math.sqrt(mse_rgb))
+    psnr_y = float("inf") if mse_y == 0 else 20.0 * math.log10(255.0 / math.sqrt(mse_y))
+
+    return {
+        "psnr_rgb": psnr_rgb,
+        "psnr_y": psnr_y,
+        "mse_rgb": mse_rgb,
+        "mse_y": mse_y,
+    }
+
+
+def calculate_psnr(reference: np.ndarray, target: np.ndarray, border: int = 0) -> float:
+    return calculate_metrics(reference, target, border)["psnr_rgb"]
+
+
+def calculate_psnr_y(reference: np.ndarray, target: np.ndarray, border: int = 0) -> float:
+    return calculate_metrics(reference, target, border)["psnr_y"]
+
+
+def calculate_mse(reference: np.ndarray, target: np.ndarray, border: int = 0) -> float:
+    return calculate_metrics(reference, target, border)["mse_rgb"]
+
+
+def calculate_mse_y(reference: np.ndarray, target: np.ndarray, border: int = 0) -> float:
+    return calculate_metrics(reference, target, border)["mse_y"]
 
 
 def blur_downsample(image: torch.Tensor, kernel: torch.Tensor, scale_factor: int) -> torch.Tensor:

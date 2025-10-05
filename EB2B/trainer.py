@@ -22,12 +22,14 @@ if __package__ is None or __package__ == "":
     from utils import (  # type: ignore
         blur_downsample,
         calculate_psnr,
+        calculate_metrics,
         ensure_dir,
         get_noise,
         image_to_tensor,
         load_image,
         make_gradient_filter,
-        save_sr_kernel_figure,
+        save_image,
+        save_kernel,
         tensor_to_image,
     )
 else:
@@ -37,12 +39,14 @@ else:
     from .utils import (
         blur_downsample,
         calculate_psnr,
+        calculate_metrics,
         ensure_dir,
         get_noise,
         image_to_tensor,
         load_image,
         make_gradient_filter,
-        save_sr_kernel_figure,
+        save_image,
+        save_kernel,
         tensor_to_image,
     )
 
@@ -65,18 +69,8 @@ class EBTrainingConfig:
     save_output: bool = True
 
     @property
-    def actual_max_iters(self) -> int:
-        """Compute actual outer loop iterations (divided by I_loop_x like DKP)"""
-        return max(1, self.max_iters // max(1, self.I_loop_x))
-
-    @property
     def print_iteration(self) -> int:
-        return max(1, (self.actual_max_iters * self.I_loop_x) // 5)
-
-    @property
-    def ssim_threshold(self) -> int:
-        """Compute SSIM iterations threshold (divided by I_loop_x like DKP)"""
-        return max(0, 80 // self.I_loop_x)
+        return max(1, (self.max_iters * self.I_loop_x) // 5)
 
     def resolved_kernel_size(self) -> int:
         if self.kernel_size is not None:
@@ -139,11 +133,10 @@ class EBTrainer:
         )
         self.noise.requires_grad = False
 
-        # Use config values (now properly defaulted to match DKP's hardcoded values)
         eb_conf = EmpiricalBayesConfig(
             learning_rate=self.config.eb_lr,
             prior_weight=self.config.eb_prior_weight,
-            anneal_iters=self.config.actual_max_iters,
+            anneal_iters=self.config.max_iters,
             num_steps=self.config.eb_steps,
         )
         self.eb_kernel = EmpiricalBayesKernelEstimator(
@@ -159,21 +152,20 @@ class EBTrainer:
         self.grad_filters = make_gradient_filter(self.device)
         self.noise2_mean = 1.0
         self.num_pixels = self.lr_tensor.numel()
-        self.ssim_iterations = self.config.ssim_threshold
+        self.ssim_iterations = min(80, self.config.max_iters)
         self.print_iteration = self.config.print_iteration
-        self.output_dir: Optional[Path] = None
-        self.save_output = self.config.save_output
-        self.save_output = self.config.save_output
+        self.log_dir: Optional[Path] = None
 
     def train(self) -> Tuple[np.ndarray, np.ndarray]:
         best_psnr = -float("inf")
         best_sr: Optional[np.ndarray] = None
         best_kernel: Optional[np.ndarray] = None
+        best_loss = float("inf")
 
         total_inner = self.config.I_loop_x
         pad = self.config.resolved_kernel_size() // 2
 
-        for iteration in range(self.config.actual_max_iters):
+        for iteration in range(self.config.max_iters):
             sr = self.generator(self.noise)
             sr_pad = F.pad(sr, mode='circular', pad=(pad, pad, pad, pad))
 
@@ -214,6 +206,13 @@ class EBTrainer:
                 loss_x_update.backward(retain_graph=True)
                 self.optimizer_dip.step()
                 loss_x_update = loss_x_update.detach()
+
+                if self.hr_image_np is None:
+                    loss_value = float(loss_x_update.item())
+                    if loss_value < best_loss:
+                        best_loss = loss_value
+                        best_sr = tensor_to_image(sr.detach())
+                        best_kernel = kernel.clone().detach().squeeze().cpu().numpy()
 
                 kernel_for_loss = kernel.clone().detach().requires_grad_(True)
                 out_k = F.conv2d(sr_pad.clone().detach(), kernel_for_loss.expand(3, -1, -1, -1), groups=3)
@@ -267,24 +266,29 @@ class EBTrainer:
         kernel_np = kernel.squeeze().detach().cpu().numpy()
 
         if self.hr_image_np is not None and self.hr_tensor is not None:
-            psnr_val = calculate_psnr(self.hr_image_np, sr_img)
+            metrics = calculate_metrics(self.hr_image_np, sr_img)
+            psnr_val = metrics["psnr_rgb"]
+            psnr_y = metrics["psnr_y"]
+            mse_rgb = metrics["mse_rgb"]
+            mse_y = metrics["mse_y"]
             ssim_val = self.ssimloss(sr, self.hr_tensor).item()
         else:
             psnr_val = -1.0
+            psnr_y = -1.0
+            mse_rgb = -1.0
+            mse_y = -1.0
             ssim_val = -1.0
 
         print(
-            f" Iter {iteration:03d}, loss: {loss_x.item():.6f}, PSNR: {psnr_val:.2f}, SSIM: {ssim_val:.4f}"
+            f" Iter {iteration:03d}, loss: {loss_x.item():.6f}, PSNR: {psnr_val:.2f}, SSIM: {ssim_val:.4f}, "
+            f"PSNR_Y: {psnr_y:.2f}, MSE_RGB: {mse_rgb:.6f}, MSE_Y: {mse_y:.6f}"
         )
 
-        if self.save_output and self.output_dir is not None:
-            ensure_dir(self.output_dir)
+        if self.log_dir is not None:
+            ensure_dir(self.log_dir)
             step_str = f"{global_step:05d}"
-            save_sr_kernel_figure(
-                sr_img,
-                kernel_np,
-                self.output_dir / f"{self.lr_path.stem}_{step_str}.png",
-            )
+            save_image(sr_img, self.log_dir / f"{self.lr_path.stem}_{step_str}.png")
+            save_kernel(kernel_np, self.log_dir, f"{self.lr_path.stem}_{step_str}")
 
     def calculate_grad_abs(self, padding_mode: str = "reflect") -> torch.Tensor:
         hr_pad = F.pad(self.im_HR_est, mode=padding_mode, pad=(1,) * 4)
@@ -297,10 +301,16 @@ class EBTrainer:
         )
         return torch.abs(out.squeeze(0))
 
-    def run_and_save(self, output_dir: Path) -> None:
-        self.output_dir = output_dir if self.save_output else None
+    def run_and_save(self, output_dir: Path, log_dir: Optional[Path] = None) -> None:
+        self.log_dir = None
+        if self.config.save_output:
+            self.log_dir = log_dir or (output_dir / "logs")
+
         sr_img, kernel = self.train()
+
         stem = self.lr_path.stem
-        if self.save_output:
-            save_sr_kernel_figure(sr_img, kernel, output_dir / f"{stem}.png")
-        return sr_img, kernel
+        output_path = output_dir / self.lr_path.name
+        save_image(sr_img, output_path)
+
+        if self.log_dir is not None:
+            save_kernel(kernel, self.log_dir, stem)

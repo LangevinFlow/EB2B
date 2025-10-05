@@ -21,11 +21,11 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(package_root))
 
     from trainer import EBTrainer, EBTrainingConfig  # type: ignore
-    from utils import ensure_dir, save_sr_kernel_figure, calculate_psnr  # type: ignore
+    from utils import ensure_dir, save_sr_kernel_figure, calculate_metrics  # type: ignore
     from losses import SSIMLoss  # type: ignore
 else:
     from .trainer import EBTrainer, EBTrainingConfig
-    from .utils import ensure_dir, save_sr_kernel_figure, calculate_psnr
+    from .utils import ensure_dir, save_sr_kernel_figure, calculate_metrics
     from .losses import SSIMLoss
 
 
@@ -35,7 +35,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sf", type=int, default=4, help="Scale factor")
     parser.add_argument("--input-dir", type=Path, default=None, help="Directory containing low-resolution inputs")
     parser.add_argument("--hr-dir", type=Path, default=None, help="Directory containing high-resolution references")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Directory to store outputs")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Directory to store final reconstructions")
+    parser.add_argument("--output-log-dir", type=Path, default=None, help="Directory to store intermediate logs (images + kernels)")
     parser.add_argument("--image", type=str, default=None, help="Process a single image (filename)")
     parser.add_argument("--max-iters", type=int, default=1000, help="Number of outer iterations (will be divided by I_loop_x=5)")
     parser.add_argument("--eb-steps", type=int, default=25, help="Inner Empirical Bayes iterations per outer step")
@@ -91,7 +92,8 @@ def main(argv: list[str] | None = None) -> None:
 
     input_dir = args.input_dir or default_input
     hr_dir = args.hr_dir or default_hr
-    output_dir = args.output_dir or default_output
+    output_dir = (args.output_dir or default_output).expanduser()
+    log_dir = args.output_log_dir.expanduser() if args.output_log_dir else None
 
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
@@ -102,6 +104,10 @@ def main(argv: list[str] | None = None) -> None:
         hr_dir = None
 
     ensure_dir(output_dir)
+    resolved_log_dir = None
+    if not args.no_save_output:
+        resolved_log_dir = log_dir or (output_dir / "logs")
+        ensure_dir(resolved_log_dir)
 
     device = select_device(args.device)
 
@@ -121,6 +127,7 @@ def main(argv: list[str] | None = None) -> None:
         save_output=not args.no_save_output,
     )
 
+    
     lr_images = sorted(input_dir.glob("*.png"))
     if args.image is not None:
         candidate = input_dir / args.image
@@ -129,7 +136,15 @@ def main(argv: list[str] | None = None) -> None:
         lr_images = [candidate]
 
     if not lr_images:
-        raise RuntimeError(f"No PNG images found in {input_dir}")
+        try:
+            lr_images = sorted(input_dir.glob("*.jpg"))
+            if args.image is not None:
+                candidate = input_dir / args.image
+                if not candidate.exists():
+                    raise FileNotFoundError(f"Specific image not found: {candidate}")
+                lr_images = [candidate]
+        except:
+            raise RuntimeError(f"No PNG images found in {input_dir}")
 
     for lr_path in lr_images:
         hr_path = None
@@ -139,7 +154,7 @@ def main(argv: list[str] | None = None) -> None:
                 hr_path = candidate
         print(f"Processing {lr_path.name} (device={device})")
         trainer = EBTrainer(lr_path, hr_path=hr_path, device=device, config=config)
-        trainer.run_and_save(output_dir)
+        trainer.run_and_save(output_dir, resolved_log_dir)
 
 
 def run_from_config(args) -> None:
@@ -285,13 +300,21 @@ def run_from_config(args) -> None:
                 print(f"Processing {name or manifest_path.stem}: {output_basename} (scale x{scale})")
                 sr_img, kernel = trainer.train()
 
-                psnr_val = ""
+                psnr_rgb = ""
+                psnr_y = ""
+                mse_rgb = ""
+                mse_y = ""
                 ssim_val = ""
                 if hr_path is not None:
                     hr_uint8 = np.array(Image.open(hr_path).convert("RGB"), dtype=np.uint8)
+                    metrics = calculate_metrics(hr_uint8, sr_img, border=scale)
+                    psnr_rgb = f"{metrics['psnr_rgb']:.4f}"
+                    psnr_y = f"{metrics['psnr_y']:.4f}"
+                    mse_rgb = f"{metrics['mse_rgb']:.6f}"
+                    mse_y = f"{metrics['mse_y']:.6f}"
+
                     hr_tensor = torch.from_numpy(hr_uint8.transpose(2, 0, 1)).unsqueeze(0).float().to(device) / 255.0
                     sr_tensor = torch.from_numpy(sr_img.transpose(2, 0, 1)).unsqueeze(0).float().to(device) / 255.0
-                    psnr_val = f"{calculate_psnr(hr_uint8, sr_img):.4f}"
                     with torch.no_grad():
                         ssim_val = f"{float(ssim_metric(sr_tensor, hr_tensor).item()):.4f}"
 
@@ -308,7 +331,10 @@ def run_from_config(args) -> None:
                         "dataset": name or manifest_path.stem,
                         "pair_id": pair_id,
                         "scale": str(scale),
-                        "psnr": psnr_val,
+                        "psnr_rgb": psnr_rgb,
+                        "psnr_y": psnr_y,
+                        "mse_rgb": mse_rgb,
+                        "mse_y": mse_y,
                         "ssim": ssim_val,
                         "sr_path": sr_saved_rel,
                         "lr_path": lr_saved_rel or row.get("lr_path", ""),
@@ -323,10 +349,43 @@ def run_from_config(args) -> None:
             summary_path = dataset_output_dir / "results_summary.csv"
             ensure_dir(dataset_output_dir)
             with summary_path.open("w", newline="", encoding="utf-8") as csvfile:
-                fieldnames = ["dataset", "pair_id", "scale", "psnr", "ssim", "sr_path", "lr_path", "hr_path"]
+                fieldnames = [
+                    "dataset",
+                    "pair_id",
+                    "scale",
+                    "psnr_rgb",
+                    "psnr_y",
+                    "mse_rgb",
+                    "mse_y",
+                    "ssim",
+                    "sr_path",
+                    "lr_path",
+                    "hr_path",
+                ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(dataset_stats)
+
+                psnr_values = [float(row["psnr_rgb"]) for row in dataset_stats if row["psnr_rgb"]]
+                psnr_y_values = [float(row["psnr_y"]) for row in dataset_stats if row["psnr_y"]]
+                mse_values = [float(row["mse_rgb"]) for row in dataset_stats if row["mse_rgb"]]
+                mse_y_values = [float(row["mse_y"]) for row in dataset_stats if row["mse_y"]]
+                ssim_values = [float(row["ssim"]) for row in dataset_stats if row["ssim"]]
+                writer.writerow(
+                    {
+                        "dataset": name,
+                        "pair_id": "MEAN",
+                        "scale": "",
+                        "psnr_rgb": f"{np.mean(psnr_values):.4f}" if psnr_values else "",
+                        "psnr_y": f"{np.mean(psnr_y_values):.4f}" if psnr_y_values else "",
+                        "mse_rgb": f"{np.mean(mse_values):.6f}" if mse_values else "",
+                        "mse_y": f"{np.mean(mse_y_values):.6f}" if mse_y_values else "",
+                        "ssim": f"{np.mean(ssim_values):.4f}" if ssim_values else "",
+                        "sr_path": "",
+                        "lr_path": "",
+                        "hr_path": "",
+                    }
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover

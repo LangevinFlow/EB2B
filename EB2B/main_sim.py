@@ -21,12 +21,12 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(package_root))
 
     from trainer import EBTrainer, EBTrainingConfig  # type: ignore
-    from utils import ensure_dir, calculate_psnr  # type: ignore
+    from utils import ensure_dir, calculate_metrics  # type: ignore
     from main import select_device  # type: ignore
     from losses import SSIMLoss  # type: ignore
 else:
     from .trainer import EBTrainer, EBTrainingConfig
-    from .utils import ensure_dir, calculate_psnr
+    from .utils import ensure_dir, calculate_metrics
     from .losses import SSIMLoss
     from .main import select_device
 
@@ -58,18 +58,26 @@ def gather_kernel_dirs(dataset_root: Path, kernels_filter: Optional[Iterable[str
     return [d for d in dirs if d.is_dir()]
 
 
-def compute_metrics(device: torch.device, ssim_metric: SSIMLoss, sr_img: np.ndarray, hr_path: Optional[Path]) -> Dict[str, str]:
+def compute_metrics(device: torch.device, ssim_metric: SSIMLoss, sr_img: np.ndarray, hr_path: Optional[Path], border: int) -> Dict[str, str]:
     if hr_path is None:
-        return {"psnr": "", "ssim": ""}
+        return {"psnr_rgb": "", "psnr_y": "", "mse_rgb": "", "mse_y": "", "ssim": ""}
 
     hr_uint8 = np.array(Image.open(hr_path).convert("RGB"), dtype=np.uint8)
-    psnr_val = f"{calculate_psnr(hr_uint8, sr_img):.4f}"
+    metrics = calculate_metrics(hr_uint8, sr_img, border=border)
 
     hr_tensor = torch.from_numpy(hr_uint8.transpose(2, 0, 1)).unsqueeze(0).float().to(device) / 255.0
     sr_tensor = torch.from_numpy(sr_img.transpose(2, 0, 1)).unsqueeze(0).float().to(device) / 255.0
     with torch.no_grad():
         ssim_val = float(ssim_metric(sr_tensor, hr_tensor).item())
-    return {"psnr": psnr_val, "ssim": f"{ssim_val:.4f}"}
+
+    metrics.update({
+        "psnr_rgb": f"{metrics['psnr_rgb']:.4f}",
+        "psnr_y": f"{metrics['psnr_y']:.4f}",
+        "mse_rgb": f"{metrics['mse_rgb']:.6f}",
+        "mse_y": f"{metrics['mse_y']:.6f}",
+        "ssim": f"{ssim_val:.4f}"
+    })
+    return metrics
 
 
 def run_from_config(args: argparse.Namespace) -> None:
@@ -176,7 +184,13 @@ def run_from_config(args: argparse.Namespace) -> None:
                     print(f"Processing {name}/{kernel_dir.name}: {row.get('pair_id')} (x{scale})")
                     sr_img, kernel = trainer.train()
 
-                    metrics = compute_metrics(device, ssim_metric, sr_img, hr_path if entry.get("use_hr", True) else None)
+                    metrics = compute_metrics(
+                        device,
+                        ssim_metric,
+                        sr_img,
+                        hr_path if entry.get("use_hr", True) else None,
+                        border=scale,
+                    )
 
                     sr_rel = ""
                     if save_results:
@@ -190,7 +204,10 @@ def run_from_config(args: argparse.Namespace) -> None:
                             "kernel": kernel_dir.name,
                             "pair_id": row.get("pair_id", ""),
                             "scale": str(scale),
-                            "psnr": metrics["psnr"],
+                            "psnr_rgb": metrics["psnr_rgb"],
+                            "psnr_y": metrics["psnr_y"],
+                            "mse_rgb": metrics["mse_rgb"],
+                            "mse_y": metrics["mse_y"],
                             "ssim": metrics["ssim"],
                             "sr_path": sr_rel,
                             "hr_path": hr_rel,
@@ -215,10 +232,44 @@ def run_from_config(args: argparse.Namespace) -> None:
             summary_path = results_dir / "results_summary.csv"
             ensure_dir(results_dir)
             with summary_path.open("w", newline="", encoding="utf-8") as csvfile:
-                fieldnames = ["dataset", "kernel", "pair_id", "scale", "psnr", "ssim", "sr_path", "hr_path", "lr_path"]
+                fieldnames = [
+                    "dataset",
+                    "kernel",
+                    "pair_id",
+                    "scale",
+                    "psnr_rgb",
+                    "psnr_y",
+                    "mse_rgb",
+                    "mse_y",
+                    "ssim",
+                    "sr_path",
+                    "hr_path",
+                    "lr_path",
+                ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(stats_rows)
+                psnr_values = [float(row["psnr_rgb"]) for row in stats_rows if row["psnr_rgb"]]
+                psnr_y_values = [float(row["psnr_y"]) for row in stats_rows if row["psnr_y"]]
+                mse_values = [float(row["mse_rgb"]) for row in stats_rows if row["mse_rgb"]]
+                mse_y_values = [float(row["mse_y"]) for row in stats_rows if row["mse_y"]]
+                ssim_values = [float(row["ssim"]) for row in stats_rows if row["ssim"]]
+                writer.writerow(
+                    {
+                        "dataset": name,
+                        "kernel": kernel_dir.name,
+                        "pair_id": "MEAN",
+                        "scale": "",
+                        "psnr_rgb": f"{np.mean(psnr_values):.4f}" if psnr_values else "",
+                        "psnr_y": f"{np.mean(psnr_y_values):.4f}" if psnr_y_values else "",
+                        "mse_rgb": f"{np.mean(mse_values):.6f}" if mse_values else "",
+                        "mse_y": f"{np.mean(mse_y_values):.6f}" if mse_y_values else "",
+                        "ssim": f"{np.mean(ssim_values):.4f}" if ssim_values else "",
+                        "sr_path": "",
+                        "hr_path": "",
+                        "lr_path": "",
+                    }
+                )
 
             print(f"  Completed kernel {kernel_dir.name} ({processed} samples)")
 
